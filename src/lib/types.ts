@@ -158,6 +158,7 @@ export type SheetRole =
   | "history"
   | "comments"
   | "attachments"
+  | "events"
   | "view"
   | "backup"
   | "unknown";

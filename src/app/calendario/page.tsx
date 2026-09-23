@@ -4,11 +4,27 @@ import { useMemo, useState, type ReactNode } from "react";
 import { FiltersBar, useFiltered } from "@/components/Filters";
 import { Button, Card, PageHeader, PostCard } from "@/components/ui";
 import { addDays, DAY_NAMES, formatDateLong, fromISO, MONTH_NAMES, startOfWeek, toISO, todayISO } from "@/lib/dates";
+import { EVENT_ICON, isCancelled, sortEvents, type TeamEvent } from "@/lib/events";
 import { sortByDateTime } from "@/lib/insights";
 import { useStore } from "@/lib/store";
 import type { Post, PostPatch } from "@/lib/types";
 
 type View = "mes" | "semana" | "dia";
+
+/** Team event in the calendar: dashed and not draggable, so it reads apart from posts. Opens the event editor. */
+function EventChip({ event: e, compact = false }: { event: TeamEvent; compact?: boolean }) {
+  const { openEvent } = useStore();
+  return (
+    <button
+      onClick={() => openEvent(e.key)}
+      className={`block w-full truncate rounded-lg border border-dashed border-accent/60 bg-accent/10 text-left font-medium hover:bg-accent/20 ${compact ? "px-2 py-1 text-xs" : "p-2.5 text-sm"} ${isCancelled(e) ? "line-through opacity-50" : ""}`}
+      title={e.team.map((m) => m.name).join(", ") || "Nadie asignado"}
+    >
+      <span className="text-muted">{e.time ?? ""}</span> {EVENT_ICON[e.type] ?? "📌"} {e.title}
+      {!compact && e.team.length > 0 && <span className="ml-1 text-xs font-normal text-muted">· {e.team.map((m) => m.name).join(", ")}</span>}
+    </button>
+  );
+}
 
 function DropZone({ onDrop, className = "", children }: { onDrop: (key: string) => void; className?: string; children: ReactNode }) {
   const [over, setOver] = useState(false);
@@ -33,7 +49,7 @@ function DropZone({ onDrop, className = "", children }: { onDrop: (key: string) 
 }
 
 export default function CalendarPage() {
-  const { posts: all, update } = useStore();
+  const { posts: all, update, events, openEvent } = useStore();
   const posts = useFiltered();
   const [view, setView] = useState<View>("mes");
   const [cursor, setCursor] = useState(todayISO());
@@ -44,6 +60,11 @@ export default function CalendarPage() {
     posts.filter((p) => p.date).sort(sortByDateTime).forEach((p) => m.set(p.date!, [...(m.get(p.date!) ?? []), p]));
     return m;
   }, [posts]);
+  const eventsByDate = useMemo(() => {
+    const m = new Map<string, TeamEvent[]>();
+    events.filter((e) => e.date).sort(sortEvents).forEach((e) => m.set(e.date!, [...(m.get(e.date!) ?? []), e]));
+    return m;
+  }, [events]);
   const undated = posts.filter((p) => !p.date && !/^(publicad|cancelad)/i.test(p.status));
 
   const move = (key: string, patch: PostPatch) => {
@@ -69,7 +90,7 @@ export default function CalendarPage() {
     <>
       <PageHeader
         title="Calendario"
-        subtitle="Arrastrá una publicación para cambiar su fecha (u hora en vista Día). El cambio se escribe en el Sheet."
+        subtitle="Arrastrá una publicación para cambiar su fecha (u hora en vista Día). Los eventos del equipo se ven con borde punteado."
         actions={
           <>
             <div className="flex rounded-lg border border-line p-0.5">
@@ -82,6 +103,7 @@ export default function CalendarPage() {
             <Button variant="outline" onClick={() => step(-1)}>‹</Button>
             <Button variant="outline" onClick={() => setCursor(today)}>Hoy</Button>
             <Button variant="outline" onClick={() => step(1)}>›</Button>
+            <Button variant="outline" onClick={() => openEvent("new", { date: view === "mes" ? null : cursor })}>+ Evento</Button>
           </>
         }
       />
@@ -90,7 +112,7 @@ export default function CalendarPage() {
 
       <div className="grid gap-4 xl:grid-cols-[1fr_260px]">
         <div className="min-w-0">
-          {view === "mes" && <MonthGrid cursor={cursor} today={today} byDate={byDate} move={move} onDay={(iso) => { setCursor(iso); setView("dia"); }} />}
+          {view === "mes" && <MonthGrid cursor={cursor} today={today} byDate={byDate} eventsByDate={eventsByDate} move={move} onDay={(iso) => { setCursor(iso); setView("dia"); }} />}
           {view === "semana" && (
             <div className="grid gap-2 overflow-x-auto md:grid-cols-7">
               {Array.from({ length: 7 }, (_, i) => addDays(startOfWeek(cursor), i)).map((iso) => (
@@ -99,6 +121,7 @@ export default function CalendarPage() {
                     {DAY_NAMES[(fromISO(iso).getDay() + 6) % 7]} {fromISO(iso).getDate()}
                   </div>
                   <div className="space-y-1.5">
+                    {(eventsByDate.get(iso) ?? []).map((e) => <EventChip key={e.key} event={e} compact />)}
                     {(byDate.get(iso) ?? []).map((p) => <PostCard key={p.key} post={p} draggable />)}
                   </div>
                 </DropZone>
@@ -110,6 +133,7 @@ export default function CalendarPage() {
               <DropZone onDrop={(k) => move(k, { date: cursor, time: null })} className="flex gap-3 p-2">
                 <div className="w-14 shrink-0 pt-1 text-xs text-muted">Sin hora</div>
                 <div className="flex-1 space-y-1.5">
+                  {(eventsByDate.get(cursor) ?? []).filter((e) => !e.time).map((e) => <EventChip key={e.key} event={e} />)}
                   {(byDate.get(cursor) ?? []).filter((p) => !p.time).map((p) => <PostCard key={p.key} post={p} draggable />)}
                 </div>
               </DropZone>
@@ -119,6 +143,7 @@ export default function CalendarPage() {
                   <DropZone key={h} onDrop={(k) => move(k, { date: cursor, time: `${hh}:00` })} className="flex min-h-12 gap-3 p-2">
                     <div className="w-14 shrink-0 pt-1 text-xs text-muted">{hh}:00</div>
                     <div className="flex-1 space-y-1.5">
+                      {(eventsByDate.get(cursor) ?? []).filter((e) => e.time?.startsWith(hh)).map((e) => <EventChip key={e.key} event={e} />)}
                       {(byDate.get(cursor) ?? []).filter((p) => p.time?.startsWith(hh)).map((p) => <PostCard key={p.key} post={p} draggable />)}
                     </div>
                   </DropZone>
@@ -140,8 +165,8 @@ export default function CalendarPage() {
   );
 }
 
-function MonthGrid({ cursor, today, byDate, move, onDay }: {
-  cursor: string; today: string; byDate: Map<string, Post[]>;
+function MonthGrid({ cursor, today, byDate, eventsByDate, move, onDay }: {
+  cursor: string; today: string; byDate: Map<string, Post[]>; eventsByDate: Map<string, TeamEvent[]>;
   move: (k: string, p: PostPatch) => void; onDay: (iso: string) => void;
 }) {
   const d = fromISO(cursor);
@@ -157,15 +182,18 @@ function MonthGrid({ cursor, today, byDate, move, onDay }: {
         {days.map((iso) => {
           const inMonth = fromISO(iso).getMonth() === d.getMonth();
           const items = byDate.get(iso) ?? [];
+          const evs = eventsByDate.get(iso) ?? [];
+          const room = Math.max(0, 4 - evs.length);
           return (
             <DropZone key={iso} onDrop={(k) => move(k, { date: iso })} className={`min-h-28 bg-panel p-1.5 ${inMonth ? "" : "opacity-45"}`}>
               <button onClick={() => onDay(iso)} className={`mb-1 inline-flex size-6 items-center justify-center rounded-full text-xs ${iso === today ? "bg-accent font-bold text-white" : "text-muted hover:bg-panel-2"}`}>
                 {fromISO(iso).getDate()}
               </button>
               <div className="space-y-1">
-                {items.slice(0, 4).map((p) => <PostCard key={p.key} post={p} compact draggable />)}
-                {items.length > 4 && (
-                  <button onClick={() => onDay(iso)} className="text-[11px] text-muted hover:text-fg">+{items.length - 4} más</button>
+                {evs.map((e) => <EventChip key={e.key} event={e} compact />)}
+                {items.slice(0, room).map((p) => <PostCard key={p.key} post={p} compact draggable />)}
+                {items.length > room && (
+                  <button onClick={() => onDay(iso)} className="text-[11px] text-muted hover:text-fg">+{items.length - room} más</button>
                 )}
               </div>
             </DropZone>

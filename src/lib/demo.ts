@@ -1,6 +1,7 @@
 // Demo data, used ONLY while Google Sheets is not connected. Disappears once connected.
 import { emptyPost } from "./codec";
 import { addDays, formatDateTime, todayISO } from "./dates";
+import { eventFingerprint, newEventId, parseTasks, parseTeam, type EventDraft, type TeamEvent } from "./events";
 import type { DataProvider, Snapshot } from "./provider";
 import type { CommentEntry, HistoryEntry, Lists, Post, PostPatch } from "./types";
 
@@ -54,14 +55,39 @@ function build(): Post[] {
   return posts;
 }
 
+function buildEvents(): TeamEvent[] {
+  const today = todayISO();
+  const seed: [number, string | null, string, string, string, string, string, string, string][] = [
+    [2, "15:30", "Partido", "Demo · Local vs Visitante", "Club Demo", "Salida de 22", "Demo A (Fotos), Demo B (Video)", "☐ Placa previa — Demo A\n☐ Stories en vivo — Demo B\n☑ Acreditación", "Confirmado"],
+    [4, "20:00", "Partido", "Demo · Clásico de hockey", "Estadio Demo", "Corner Corto 22", "Demo C (Periodista)", "☐ Conseguir acreditación — Demo C", "A confirmar"],
+    [6, null, "Viaje", "Demo · Torneo en el interior", "Ciudad Demo", "Grupo 22", "", "☐ Definir quién viaja\n☐ Reservar alojamiento", "A confirmar"],
+  ];
+  return seed.map(([d, time, type, title, place, brand, team, tasks, status], i) => {
+    const e = {
+      id: `DEMO-EV-${i + 1}`, type, title, date: addDays(today, d), time, endTime: null, place, brand,
+      team: parseTeam(team), tasks: parseTasks(tasks), status, notes: "", createdBy: "Demo", updatedAt: "",
+    };
+    return { ...e, key: e.id, rowHint: i + 2, snapshot: eventFingerprint(e) };
+  });
+}
+
 export class DemoDataProvider implements DataProvider {
   readonly kind = "demo" as const;
   private posts = build();
   private history: HistoryEntry[] = [];
   private comments: CommentEntry[] = [];
+  private events = buildEvents();
 
   async load(): Promise<Snapshot> {
-    return { posts: this.posts.map((p) => ({ ...p })), lists: LISTS, workbook: null };
+    return { posts: this.posts.map((p) => ({ ...p })), events: this.events.map((e) => ({ ...e })), lists: LISTS, workbook: null };
+  }
+
+  async saveEvent(prev: TeamEvent | null, draft: EventDraft, user: string): Promise<TeamEvent> {
+    const base = prev ?? { id: newEventId(), createdBy: user, rowHint: 0 };
+    const e = { ...draft, id: base.id, createdBy: base.createdBy, updatedAt: `${formatDateTime(new Date())} · ${user}` };
+    const saved = { ...e, key: e.id, rowHint: base.rowHint, snapshot: eventFingerprint(e) };
+    this.events = prev ? this.events.map((x) => (x.id === prev.id ? saved : x)) : [...this.events, saved];
+    return { ...saved };
   }
 
   async updatePost(post: Post, patch: PostPatch, user: string): Promise<Post> {

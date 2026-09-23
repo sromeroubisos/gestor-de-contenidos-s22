@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DemoDataProvider } from "./demo";
+import type { EventDraft, TeamEvent } from "./events";
 import { getUserEmail, RestTransport, ScriptTransport, signIn, signOut, storedToken } from "./google";
 import { EMPTY_FILTERS, guessOwner, type Filters } from "./insights";
 import { GoogleSheetsDataProvider, type DataProvider } from "./provider";
@@ -48,6 +49,11 @@ interface Store {
   refresh: (reanalyze?: boolean) => Promise<void>;
   update: (post: Post, patch: PostPatch) => Promise<boolean>;
   create: (patch: PostPatch) => Promise<Post | null>;
+  events: TeamEvent[];
+  /** Event open in the editor: an existing key, or "new" with optional prefilled fields. */
+  eventEditor: { key: string; preset?: Partial<EventDraft> } | null;
+  openEvent: (key: string | null, preset?: Partial<EventDraft>) => void;
+  saveEvent: (prev: TeamEvent | null, draft: EventDraft) => Promise<TeamEvent | null>;
   provider: DataProvider;
 }
 
@@ -73,6 +79,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     key: process.env.NEXT_PUBLIC_SCRIPT_KEY ?? "",
   });
   const [posts, setPosts] = useState<Post[]>([]);
+  const [events, setEvents] = useState<TeamEvent[]>([]);
+  const [eventEditor, setEventEditor] = useState<Store["eventEditor"]>(null);
   const [lists, setLists] = useState<Lists>(EMPTY_LISTS);
   const [workbook, setWorkbook] = useState<WorkbookMap | null>(null);
   const [sync, setSync] = useState<Store["sync"]>({ state: "idle", lastSync: null, error: null });
@@ -93,6 +101,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     try {
       const snap = await p.load(reanalyze);
       setPosts(snap.posts);
+      setEvents(snap.events);
       setLists(snap.lists);
       setWorkbook(snap.workbook);
       setSync({ state: "ok", lastSync: new Date(), error: null });
@@ -238,6 +247,27 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     [provider, who, toast],
   );
 
+  const saveEvent = useCallback(
+    async (prev: TeamEvent | null, draft: EventDraft) => {
+      writing.current++;
+      if (prev) setEvents((es) => es.map((e) => (e.key === prev.key ? { ...e, ...draft } : e)));
+      try {
+        const saved = await provider.saveEvent(prev, draft, who);
+        setEvents((es) => (prev ? es.map((e) => (e.key === prev.key ? saved : e)) : [...es, saved]));
+        toast("ok", provider.kind === "google" ? "Evento guardado en Google Sheets ✓" : "Evento guardado (demo)");
+        return saved;
+      } catch (e) {
+        if (prev) setEvents((es) => es.map((x) => (x.key === prev.key ? prev : x)));
+        toast("error", (e as Error).message);
+        load(provider);
+        return null;
+      } finally {
+        writing.current--;
+      }
+    },
+    [provider, who, toast, load],
+  );
+
   const value = useMemo<Store>(
     () => ({
       mode: provider.kind,
@@ -277,9 +307,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       refresh,
       update,
       create,
+      events,
+      eventEditor,
+      openEvent: (key, preset) => setEventEditor(key ? { key, preset } : null),
+      saveEvent,
       provider,
     }),
-    [provider, user, me, clientId, script, startScript, posts, lists, workbook, sync, filters, openKey, newOpen, toasts, toast, connect, disconnect, refresh, update, create],
+    [provider, user, me, clientId, script, startScript, posts, lists, workbook, sync, filters, openKey, newOpen, toasts, toast, connect, disconnect, refresh, update, create, events, eventEditor, saveEvent],
   );
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;

@@ -3,6 +3,7 @@
 import type { Transport } from "./google";
 import { buildWrites, changedColumns, emptyPost, nextId, rowToPost, safeText, type Cell, type SheetCtx } from "./codec";
 import { formatDateTime } from "./dates";
+import { eventFingerprint, eventToRow, EVENTS_TAB, mapEventColumns, newEventId, rowToEvent, type EventDraft, type TeamEvent } from "./events";
 import { APP_TABS, columnLetter, looksLikePostsTable, mapColumns, normalizeHeader, quoteSheet } from "./schema";
 import {
   ConflictError,
@@ -19,6 +20,7 @@ import {
 
 export interface Snapshot {
   posts: Post[];
+  events: TeamEvent[];
   lists: Lists;
   workbook: WorkbookMap | null;
 }
@@ -31,7 +33,11 @@ export interface DataProvider {
   getHistory(postId?: string): Promise<HistoryEntry[]>;
   getComments(postId: string): Promise<CommentEntry[]>;
   addComment(postId: string, text: string, user: string): Promise<void>;
+  /** Creates the event when `prev` is null; otherwise updates it (failing if someone changed it meanwhile). */
+  saveEvent(prev: TeamEvent | null, draft: EventDraft, user: string): Promise<TeamEvent>;
 }
+
+export const EVENT_CONFLICT = "Este evento fue modificado por otro usuario. Actualizá los datos antes de guardar.";
 
 export class GoogleSheetsDataProvider implements DataProvider {
   readonly kind = "google" as const;
@@ -60,6 +66,7 @@ export class GoogleSheetsDataProvider implements DataProvider {
       if (s.title === APP_TABS.history.title) s.role = "history";
       else if (s.title === APP_TABS.comments.title) s.role = "comments";
       else if (s.title === APP_TABS.attachments.title) s.role = "attachments";
+      else if (s.title === EVENTS_TAB.title) s.role = "events";
       else if (h.includes("marcas") && h.includes("estados")) s.role = "config";
       else if (looksLikePostsTable(s.headers)) s.role = /historico|archivo|publicad/.test(t) ? "archive" : "posts";
       else if (/backup|original/.test(t)) s.role = "backup";
@@ -105,7 +112,9 @@ export class GoogleSheetsDataProvider implements DataProvider {
     const wb = this.workbook!;
     const tabs = [this.ctx.contenidos, this.ctx.historico].filter(Boolean) as SheetCtx[];
     const ranges = tabs.map((c) => `${quoteSheet(c.title)}!A2:${columnLetter(c.headers.length - 1)}`);
-    if (wb.configSheet) ranges.push(`${quoteSheet(wb.configSheet)}!A1:Z200`);
+    const configIdx = wb.configSheet ? ranges.push(`${quoteSheet(wb.configSheet)}!A1:Z200`) - 1 : -1;
+    const eventsTab = this.eventsTab();
+    const eventsIdx = eventsTab ? ranges.push(`${quoteSheet(eventsTab.title)}!A2:${columnLetter(Math.max(eventsTab.headers.length, 1) - 1)}`) - 1 : -1;
     const data = await this.t.batchGet(ranges);
 
     const posts: Post[] = [];
@@ -115,8 +124,17 @@ export class GoogleSheetsDataProvider implements DataProvider {
         if (p) posts.push(p);
       });
     });
-    const lists = parseConfig(wb.configSheet ? ((data[tabs.length] ?? []) as Cell[][]) : [], posts);
-    return { posts, lists, workbook: wb };
+    const lists = parseConfig(configIdx >= 0 ? ((data[configIdx] ?? []) as Cell[][]) : [], posts);
+
+    const events: TeamEvent[] = [];
+    if (eventsTab) {
+      const map = mapEventColumns(eventsTab.headers);
+      (data[eventsIdx] ?? []).forEach((row, r) => {
+        const e = rowToEvent(row as Cell[], r + 2, map);
+        if (e) events.push(e);
+      });
+    }
+    return { posts, events, lists, workbook: wb };
   }
 
   private rowRange(ctx: SheetCtx, row: number) {
@@ -208,11 +226,11 @@ export class GoogleSheetsDataProvider implements DataProvider {
 
   // ---------- Technical tabs (APP_HISTORIAL / APP_COMENTARIOS) ----------
 
-  private async append(tab: { title: string; headers: readonly string[] }, rows: string[][]) {
+  private async append(tab: { title: string; headers: readonly string[] }, rows: string[][], role: SheetRole = "history") {
     if (!rows.length) return;
     if (!this.workbook?.sheets.some((s) => s.title === tab.title)) {
       await this.t.addSheet(tab.title, [...tab.headers]);
-      this.workbook?.sheets.push({ sheetId: -1, title: tab.title, index: 999, hidden: false, headers: [...tab.headers], role: "history" });
+      this.workbook?.sheets.push({ sheetId: -1, title: tab.title, index: 999, hidden: false, headers: [...tab.headers], role });
     }
     await this.t.append(tab.title, rows);
   }
@@ -248,6 +266,51 @@ export class GoogleSheetsDataProvider implements DataProvider {
 
   async addComment(postId: string, text: string, user: string): Promise<void> {
     await this.append(APP_TABS.comments, [[formatDateTime(new Date()), user, postId, text]]);
+  }
+
+  // ---------- Team events (APP_EVENTOS) ----------
+
+  private eventsTab(): SheetInfo | undefined {
+    return this.workbook?.sheets.find((s) => s.title === EVENTS_TAB.title);
+  }
+
+  async saveEvent(prev: TeamEvent | null, draft: EventDraft, user: string): Promise<TeamEvent> {
+    const updatedAt = `${formatDateTime(new Date())} · ${user}`;
+    const tab = this.eventsTab();
+    const map = mapEventColumns(tab?.headers ?? []);
+
+    if (!prev) {
+      const e = { ...draft, id: newEventId(), createdBy: user, updatedAt };
+      // RAW append: every value is stored as literal text.
+      await this.append(EVENTS_TAB, [eventToRow(e, map, false)], "events");
+      await this.log([{ action: "Crear evento", postId: e.id, field: "", oldValue: "", newValue: e.title }], user);
+      return { ...e, key: e.id, rowHint: 0, snapshot: eventFingerprint(e) };
+    }
+
+    if (!tab || map.id === undefined) throw new Error("No se encontró la pestaña APP_EVENTOS.");
+    const q = quoteSheet(tab.title);
+    const idCol = columnLetter(map.id);
+    const [ids] = await this.t.batchGet([`${q}!${idCol}:${idCol}`]);
+    const idx = ids.findIndex((r) => String(r[0] ?? "").trim().replace(/^'/, "") === prev.id);
+    if (idx < 1) throw new Error(`No se encontró el evento ${prev.id} en el Sheet (¿fue borrado?).`);
+    const row = idx + 1;
+    const rowRange = `${q}!A${row}:${columnLetter(tab.headers.length - 1)}${row}`;
+
+    const [before] = await this.t.batchGet([rowRange]);
+    if (rowToEvent((before[0] ?? []) as Cell[], row, map)?.snapshot !== prev.snapshot) throw new Error(EVENT_CONFLICT);
+
+    const e = { ...draft, id: prev.id, createdBy: prev.createdBy, updatedAt };
+    const values = eventToRow(e, map, true);
+    // One range per known column, so columns added by hand in the tab are never touched.
+    await this.t.batchUpdate(
+      Object.values(map).map((col) => ({ range: `${q}!${columnLetter(col!)}${row}`, values: [[values[col!]]] })),
+    );
+
+    const [after] = await this.t.batchGet([rowRange]);
+    const saved = rowToEvent((after[0] ?? []) as Cell[], row, map);
+    if (!saved || saved.snapshot !== eventFingerprint(e)) throw new Error("No se pudo confirmar la escritura en Google Sheets.");
+    await this.log([{ action: "Editar evento", postId: e.id, field: "", oldValue: "", newValue: e.title }], user);
+    return saved;
   }
 }
 

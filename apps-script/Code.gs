@@ -10,7 +10,13 @@
  */
 const CLAVE = 'PEGAR_CLAVE_AQUI';
 
-function doGet() {
+function doGet(e) {
+  const p = (e && e.parameter) || {};
+  // Feed de eventos del equipo para suscribirse desde Google Calendar: <URL>/exec?ics=1&key=CLAVE
+  if (p.ics) {
+    if (p.key !== CLAVE) return ContentService.createTextOutput('Clave inválida');
+    return ContentService.createTextOutput(ics_(SpreadsheetApp.getActiveSpreadsheet())).setMimeType(ContentService.MimeType.ICAL);
+  }
   return out_({ ok: true, app: 'G22 Content Manager', sheet: SpreadsheetApp.getActiveSpreadsheet().getName() });
 }
 
@@ -124,4 +130,87 @@ function addSheet_(ss, title, headers) {
   if (!sh) sh = ss.insertSheet(title, ss.getSheets().length);
   if (sh.getLastRow() === 0) sh.getRange(1, 1, 1, headers.length).setValues([headers]).setFontWeight('bold');
   return {};
+}
+
+// ---------- Eventos del equipo → iCalendar (solo lectura) ----------
+
+function ics_(ss) {
+  const tz = ss.getSpreadsheetTimeZone();
+  const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//Grupo 22//Content Manager//ES', 'CALSCALE:GREGORIAN', 'METHOD:PUBLISH',
+    'X-WR-CALNAME:Grupo 22 · Eventos', 'X-WR-TIMEZONE:' + tz];
+  const sh = ss.getSheetByName('APP_EVENTOS');
+  if (sh && sh.getLastRow() > 1) {
+    const range = sh.getRange(1, 1, sh.getLastRow(), sh.getLastColumn());
+    const values = range.getValues();
+    const shown = range.getDisplayValues();
+    const head = values[0].map(function (h) { return String(h).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().trim(); });
+    const col = function (name) { return head.indexOf(name); };
+    const c = { id: col('id'), type: col('tipo'), title: col('titulo'), date: col('fecha'), time: col('hora'), end: col('hora fin'),
+      place: col('lugar'), brand: col('marca'), team: col('equipo'), tasks: col('tareas'), status: col('estado'), notes: col('notas') };
+    const stamp = Utilities.formatDate(new Date(), 'UTC', "yyyyMMdd'T'HHmmss'Z'");
+    for (let r = 1; r < values.length; r++) {
+      const get = function (k) { return c[k] < 0 ? '' : String(shown[r][c[k]]).trim(); };
+      const date = icsDate_(c.date < 0 ? '' : values[r][c.date], tz);
+      if (!get('id') || !date || /^cancel/i.test(get('status'))) continue;
+      const start = icsTime_(get('time'));
+      const icon = { Partido: '🏉', Cobertura: '🎥', 'Grabación': '🎬', 'Reunión': '💬', Viaje: '🚐' }[get('type')] || '📌';
+      lines.push('BEGIN:VEVENT', 'UID:' + get('id') + '@grupo22-cm', 'DTSTAMP:' + stamp);
+      if (!start) {
+        lines.push('DTSTART;VALUE=DATE:' + date, 'DTEND;VALUE=DATE:' + shiftDate_(date, 1));
+      } else {
+        let end = icsTime_(get('end'));
+        let endDate = date;
+        if (!end) {
+          const mins = Number(start.slice(0, 2)) * 60 + Number(start.slice(2, 4)) + 120;
+          end = pad2_(Math.floor(mins / 60) % 24) + pad2_(mins % 60) + '00';
+          if (mins >= 1440) endDate = shiftDate_(date, 1);
+        } else if (end <= start) endDate = shiftDate_(date, 1);
+        lines.push('DTSTART;TZID=' + tz + ':' + date + 'T' + start, 'DTEND;TZID=' + tz + ':' + endDate + 'T' + end);
+      }
+      const details = [get('type') + (get('brand') ? ' · ' + get('brand') : '')];
+      if (get('team')) details.push('', 'Van: ' + get('team'));
+      if (get('tasks')) details.push('', 'Tareas:', get('tasks'));
+      if (get('notes')) details.push('', get('notes'));
+      lines.push('SUMMARY:' + icsEsc_(icon + ' ' + (get('title') || get('type'))), 'DESCRIPTION:' + icsEsc_(details.join('\n')));
+      if (get('place')) lines.push('LOCATION:' + icsEsc_(get('place')));
+      if (/confirmar/i.test(get('status'))) lines.push('STATUS:TENTATIVE');
+      lines.push('END:VEVENT');
+    }
+  }
+  lines.push('END:VCALENDAR');
+  return lines.map(icsFold_).join('\r\n') + '\r\n';
+}
+
+function pad2_(n) { return (n < 10 ? '0' : '') + n; }
+
+/** Fecha real, ISO (2026-09-27) o dd/mm/yyyy → yyyyMMdd. */
+function icsDate_(v, tz) {
+  if (v instanceof Date) return Utilities.formatDate(v, tz, 'yyyyMMdd');
+  const s = String(v).trim().replace(/^'/, '');
+  let m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+  if (m) return m[1] + pad2_(+m[2]) + pad2_(+m[3]);
+  m = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  return m ? m[3] + pad2_(+m[2]) + pad2_(+m[1]) : '';
+}
+
+/** "15:30" o "15:30:00" → 153000. */
+function icsTime_(s) {
+  const m = String(s).replace(/^'/, '').match(/^(\d{1,2}):(\d{2})/);
+  return m && +m[1] < 24 ? pad2_(+m[1]) + m[2] + '00' : '';
+}
+
+function shiftDate_(yyyymmdd, days) {
+  const d = new Date(Date.UTC(+yyyymmdd.slice(0, 4), +yyyymmdd.slice(4, 6) - 1, +yyyymmdd.slice(6, 8) + days));
+  return Utilities.formatDate(d, 'UTC', 'yyyyMMdd');
+}
+
+function icsEsc_(s) {
+  return String(s).replace(/\\/g, '\\\\').replace(/;/g, '\\;').replace(/,/g, '\\,').replace(/\r?\n/g, '\\n');
+}
+
+function icsFold_(line) {
+  const out = [];
+  while (line.length > 75) { out.push(line.slice(0, 75)); line = ' ' + line.slice(75); }
+  out.push(line);
+  return out.join('\r\n');
 }

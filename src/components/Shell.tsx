@@ -8,11 +8,13 @@ import { useStore } from "@/lib/store";
 import { Button, Toasts } from "./ui";
 import { PostDrawer } from "./PostDrawer";
 import { NewPostModal } from "./NewPostModal";
+import { EventModal } from "./EventModal";
 
 const NAV = [
   { href: "/", icon: "🏠", label: "Inicio", mobile: true },
   { href: "/calendario", icon: "📅", label: "Calendario", mobile: true },
   { href: "/produccion", icon: "📋", label: "Producción", mobile: true },
+  { href: "/eventos", icon: "🏉", label: "Eventos", mobile: true },
   { href: "/cronologia", icon: "🕒", label: "Cronología" },
   { href: "/mis-tareas", icon: "👤", label: "Mis tareas", mobile: true },
   { href: "/estadisticas", icon: "📊", label: "Estadísticas" },
@@ -145,6 +147,7 @@ export function Shell({ children }: { children: ReactNode }) {
 
       <PostDrawer />
       <NewPostModal />
+      <EventModal />
       <Toasts />
     </div>
   );

@@ -37,6 +37,7 @@ Publicarla para el equipo (web + celular): subir el repo a Vercel y agregar la v
 | Dashboard, Calendario, Hoy, Agenda… | Vistas con fórmulas. La app **no las toca**. |
 | `APP_HISTORIAL` | La crea la app en el primer cambio: timestamp, usuario, post_id, acción, campo, valor anterior y valor nuevo. |
 | `APP_COMENTARIOS` | La crea la app en el primer comentario. |
+| `APP_EVENTOS` | La crea la app con el primer evento del equipo (ver abajo). |
 
 Las pestañas se detectan por sus encabezados, no por la posición de las columnas.
 En **Configuración** se ve la estructura detectada.
@@ -56,13 +57,32 @@ La app los separa por pestaña, pero el historial y los comentarios se guardan p
 Solución en el Sheet: renumerar esos 9 de CONTENIDOS desde `G22-0052` y cambiar la fórmula por
 `="G22-"&TEXT(MAX(ARRAYFORMULA(IFERROR(VALUE(RIGHT({'📋 CONTENIDOS'!A2:A;'🗄️ HISTÓRICO'!A2:A};4));0)))+1;"0000")`.
 
+## Eventos del equipo
+
+En **🏉 Eventos** se cargan los partidos y coberturas a los que va el equipo: fecha, hora, lugar, **quién va y con qué rol**,
+y una **lista de tareas** con responsable (placa previa, acreditación, llevar trípode…). Cada uno puede tocar **Me sumo**
+para anotarse. Los eventos también se ven en el **Calendario** (borde punteado) y en **Mis tareas**.
+
+Se guardan en la pestaña `APP_EVENTOS`, en texto legible: Equipo como `Santi (Fotos), Caro (Video)` y Tareas una por línea
+(`☐ Placa previa — Santi`, `☑ Acreditación`). Se pueden editar a mano en el Sheet. Los eventos no se borran: se pasan a
+estado **Cancelado**. Antes de guardar se relee la fila y, si alguien la cambió, no se pisa.
+
+Para llevarlos a Google Calendar:
+- **Un evento:** botón **📅 Google Calendar** en la ficha (abre el formulario ya completo) o **⬇ .ics**.
+- **Todos, una vez:** **⬇ Exportar calendario** en Eventos.
+- **Suscripción que se actualiza sola** (con el puente Apps Script): pegar el `Code.gs` nuevo en el Sheet y en
+  **Implementar → Gestionar implementaciones → ✏️ → Versión: Nueva versión** (así la URL no cambia). En Eventos aparece
+  el link del feed; en Google Calendar: **Otros calendarios → + → Desde URL**. Google lo refresca cada algunas horas.
+  El link lleva la clave del puente: compartirlo solo con el equipo.
+
 ## Estructura del código
 
 - `src/lib/provider.ts`: interfaz `DataProvider` + `GoogleSheetsDataProvider` (Sheets API v4). Para migrar a otra base alcanza con escribir otro provider.
 - `src/lib/codec.ts`: fila ↔ publicación, celdas a escribir y detección de conflictos (con tests en `codec.test.ts`).
 - `src/lib/demo.ts`: datos de demostración, solo sin conexión.
 - `src/lib/store.tsx`: estado, sincronización y guardado optimista.
-- `src/app/*`: Inicio, Calendario, Producción, Cronología, Mis tareas, Estadísticas, Sponsors y Configuración.
+- `src/lib/events.ts`: eventos del equipo, fila ↔ evento y exportación a Google Calendar / .ics (tests en `events.test.ts`).
+- `src/app/*`: Inicio, Calendario, Producción, Eventos, Cronología, Mis tareas, Estadísticas, Sponsors y Configuración.
 
 `npm test` corre los tests · `npm run build` compila para producción.
 

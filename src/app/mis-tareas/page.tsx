@@ -1,16 +1,27 @@
 "use client";
 
 import { useMemo } from "react";
+import { EventCard } from "@/components/EventCard";
 import { Empty, PageHeader, PostCard, Select } from "@/components/ui";
+import { todayISO } from "@/lib/dates";
+import { isCancelled, isGoing, sortEvents } from "@/lib/events";
 import { taskBuckets, type TaskBucket } from "@/lib/insights";
 import { useStore } from "@/lib/store";
 
 const ORDER: TaskBucket[] = ["Atrasadas", "Hoy", "Mañana", "Esta semana", "Próximamente", "Sin fecha"];
 
 export default function MyTasksPage() {
-  const { posts, me, setMe, lists, user } = useStore();
+  const { posts, events, me, setMe, lists, user } = useStore();
   const mine = useMemo(() => posts.filter((p) => me && p.owner === me), [posts, me]);
   const buckets = useMemo(() => taskBuckets(mine), [mine]);
+  // Upcoming events where I go or have a pending task.
+  const myEvents = useMemo(() => {
+    const today = todayISO();
+    return events
+      .filter((e) => (!e.date || e.date >= today) && !isCancelled(e))
+      .filter((e) => isGoing(e, me) || e.tasks.some((t) => !t.done && t.owner === me))
+      .sort(sortEvents);
+  }, [events, me]);
 
   return (
     <>
@@ -27,6 +38,15 @@ export default function MyTasksPage() {
       {!me ? (
         <Empty>Elegí quién sos en la lista de Responsables del Sheet para ver tus publicaciones.</Empty>
       ) : (
+        <>
+          {myEvents.length > 0 && (
+            <section className="mb-6">
+              <h2 className="mb-2 text-xs font-semibold uppercase tracking-wider text-muted">🏉 Mis próximos eventos · {myEvents.length}</h2>
+              <div className="grid gap-2 lg:grid-cols-2">
+                {myEvents.map((e) => <EventCard key={e.key} event={e} />)}
+              </div>
+            </section>
+          )}
         <div className="grid gap-5 lg:grid-cols-2">
           {ORDER.map((b) => (
             <section key={b}>
@@ -39,6 +59,7 @@ export default function MyTasksPage() {
             </section>
           ))}
         </div>
+        </>
       )}
     </>
   );
