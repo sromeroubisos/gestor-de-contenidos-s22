@@ -89,6 +89,8 @@ export function Shell({ children }: { children: ReactNode }) {
               <div className="truncate font-medium text-fg">{user.name}</div>
               <div className="truncate">{user.email}</div>
             </>
+          ) : mode === "google" ? (
+            "Conectado al Sheet"
           ) : (
             "Sin conexión con Google"
           )}
